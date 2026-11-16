@@ -67,7 +67,7 @@ SOURCES = {
 # the UI. Replace by typing current values into the override fields, or hit Refresh on a
 # host (e.g. Streamlit Cloud) that can reach the sources.
 # --------------------------------------------------------------------------------------
-FALLBACK_DATE = "approx. 2025 (fallback)"
+FALLBACK_DATE = "2026 class data (fallback)"
 
 FALLBACK_BETAS = {  # Damodaran US unlevered betas (illustrative; verify against live file)
     "Software (System & Application)": 1.15,
@@ -100,23 +100,23 @@ FALLBACK_BETAS = {  # Damodaran US unlevered betas (illustrative; verify against
     "Utility (General)": 0.38,
 }
 
-FALLBACK_TAX = {  # OECD combined statutory corporate income tax rate (central + sub-central)
-    "United States": 25.8, "Germany": 29.9, "France": 25.8, "United Kingdom": 25.0,
-    "Japan": 29.7, "Canada": 26.1, "Australia": 30.0, "China": 25.0, "India": 25.2,
+FALLBACK_TAX = {  # OECD statutory corporate income tax rate 2026, incl. sub-central (class deck)
+    "United States": 25.5, "Germany": 30.1, "France": 36.1, "United Kingdom": 25.0,
+    "Japan": 29.7, "Canada": 26.0, "Australia": 30.0, "China": 25.0, "India": 25.2,
     "Brazil": 34.0, "Mexico": 30.0, "Italy": 27.8, "Spain": 25.0, "Netherlands": 25.8,
-    "Switzerland": 19.7, "Sweden": 20.6, "Ireland": 12.5, "South Korea": 26.5,
+    "Switzerland": 19.5, "Sweden": 20.6, "Ireland": 12.5, "South Korea": 27.5,
     "Poland": 19.0, "Turkey": 25.0, "Indonesia": 22.0, "Norway": 22.0, "Denmark": 22.0,
-    "Belgium": 25.0, "Austria": 23.0, "Portugal": 31.5, "Greece": 22.0, "Argentina": 35.0,
+    "Belgium": 25.0, "Austria": 23.0, "Portugal": 29.5, "Greece": 22.0, "Argentina": 35.0,
     "South Africa": 27.0, "Singapore": 17.0,
 }
 
-FALLBACK_YIELD = {  # 10-year government bond yields, % (illustrative recent levels)
-    "United States": 4.30, "Germany": 2.65, "France": 3.25, "United Kingdom": 4.45,
-    "Japan": 1.45, "Canada": 3.35, "Australia": 4.45, "China": 1.90, "India": 6.70,
-    "Brazil": 13.80, "Mexico": 9.70, "Italy": 3.55, "Spain": 3.10, "Netherlands": 2.85,
-    "Switzerland": 0.45, "Sweden": 2.25, "Ireland": 2.90, "South Korea": 3.05,
-    "Poland": 5.70, "Turkey": 29.50, "Indonesia": 6.80, "Norway": 3.90, "Denmark": 2.70,
-    "Belgium": 3.10, "Austria": 3.05, "Portugal": 3.00, "Greece": 3.45, "Argentina": 30.00,
+FALLBACK_YIELD = {  # 10-year government bond yields, % (class deck table where available)
+    "United States": 4.90, "Germany": 3.30, "France": 4.80, "United Kingdom": 5.20,
+    "Japan": 2.60, "Canada": 3.70, "Australia": 5.00, "China": 1.60, "India": 7.20,
+    "Brazil": 15.20, "Mexico": 9.10, "Italy": 3.55, "Spain": 3.10, "Netherlands": 2.85,
+    "Switzerland": 0.40, "Sweden": 2.25, "Ireland": 2.90, "South Korea": 3.05,
+    "Poland": 6.20, "Turkey": 29.50, "Indonesia": 6.80, "Norway": 3.90, "Denmark": 2.70,
+    "Belgium": 3.10, "Austria": 3.05, "Portugal": 3.70, "Greece": 3.45, "Argentina": 30.00,
     "South Africa": 9.90, "Singapore": 2.55,
 }
 
@@ -186,14 +186,20 @@ def fetch_betas():
         return dict(FALLBACK_BETAS), {"live": False, "date": FALLBACK_DATE,
                                       "note": f"fallback ({type(e).__name__})"}
 
-    # 1) try real Excel (binary .xls or .xlsx)
+    # 1) try real Excel (binary .xls or .xlsx). Read EVERY sheet, since the industry
+    #    table is not always the first sheet.
     for engine in ("xlrd", "openpyxl"):
         try:
-            raw = pd.read_excel(io.BytesIO(r.content), sheet_name=0, header=None, engine=engine)
-            return _parse_beta_matrix(raw), {"live": True, "date": dt.date.today().isoformat(),
-                                             "note": "NYU Stern betas.xls (Excel)"}
+            book = pd.read_excel(io.BytesIO(r.content), sheet_name=None, header=None, engine=engine)
         except Exception as e:  # noqa: BLE001
             last = e
+            continue
+        for sheet_name, raw in book.items():
+            try:
+                return _parse_beta_matrix(raw), {"live": True, "date": dt.date.today().isoformat(),
+                                                 "note": f"NYU Stern betas.xls ({sheet_name})"}
+            except Exception as e:  # noqa: BLE001
+                last = e
 
     # 2) some Damodaran ".xls" files are actually HTML tables -> read as HTML
     try:
@@ -303,8 +309,8 @@ def fetch_tax():
         merged.update(out)
         return merged, {"live": True, "date": dt.date.today().isoformat(), "note": "OECD 2024 (parsed)"}
     except Exception as e:  # noqa: BLE001
-        return dict(FALLBACK_TAX), {"live": False, "date": "OECD Corporate Tax Statistics 2024",
-                                    "note": f"bundled OECD 2024 ({type(e).__name__})"}
+        return dict(FALLBACK_TAX), {"live": False, "date": "OECD statutory rates 2026",
+                                    "note": f"bundled OECD 2026 ({type(e).__name__})"}
 
 
 # --------------------------------------------------------------------------------------
@@ -362,7 +368,7 @@ st.caption("Cost of equity, cost of debt, and WACC for a project, side by side i
 
 with st.sidebar:
     st.header("Data")
-    if st.button("🔄 Refresh fetched data", use_container_width=True):
+    if st.button("🔄 Refresh fetched data", width='stretch'):
         fetch_betas.clear(); fetch_bbb.clear(); fetch_yields.clear(); fetch_tax.clear()
         st.rerun()
 
@@ -533,7 +539,7 @@ show_df = all_df.copy()
 for col in show_df.columns:
     if "equity" in col or "WACC" in col:
         show_df[col] = show_df[col].map(pct)
-st.dataframe(show_df, use_container_width=True, hide_index=True)
+st.dataframe(show_df, width='stretch', hide_index=True)
 st.download_button("⬇️ Download all-industry table (CSV)",
                    all_df.to_csv(index=False).encode(),
                    file_name=f"all_industry_cost_of_capital_{country}.csv".replace(" ", "_"),
