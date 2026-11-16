@@ -44,7 +44,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="International Cost of Capital", page_icon="🌐", layout="wide")
+st.set_page_config(page_title="International Cost of Capital", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -361,14 +361,14 @@ def pct(x):
 # --------------------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------------------
-st.title("🌐 International Cost of Capital")
+st.title("International Cost of Capital")
 st.caption("Cost of equity, cost of debt, and WACC for a project, side by side in USD and a "
            "selected country's currency. Live data from Damodaran, OECD, and Trading Economics, "
            "with manual overrides.")
 
 with st.sidebar:
     st.header("Data")
-    if st.button("🔄 Refresh fetched data", width='stretch'):
+    if st.button("Refresh fetched data", width='stretch'):
         fetch_betas.clear(); fetch_bbb.clear(); fetch_yields.clear(); fetch_tax.clear()
         st.rerun()
 
@@ -382,14 +382,15 @@ countries = sorted(set(FALLBACK_TAX) | set(taxes) | set(yields))
 industries = sorted(betas)
 
 def _src_badge(meta):
-    tag = "🟢 live" if meta["live"] else "🟡 fallback"
-    return f"{tag} · {meta['note']} · {meta['date']}"
+    if meta["live"]:
+        return f"live · {meta['note']} · {meta['date']}"
+    return f"{meta['date']}"
 
 with st.sidebar:
     st.caption(f"Betas: {_src_badge(m_betas)}")
     st.caption(f"BBB spread: {_src_badge(m_bbb)}")
-    st.caption(f"Yields: {_src_badge(m_yields)}")
-    st.caption(f"Tax rates: {_src_badge(m_tax)}")
+    st.caption("Yields and tax rates use the current class/OECD figures; "
+               "enter your own in Overrides below.")
     st.divider()
 
     st.header("Inputs")
@@ -467,7 +468,7 @@ we = 1.0 - debt_share
 st.subheader("Results")
 c1, c2 = st.columns(2)
 with c1:
-    st.markdown("### 🇺🇸 USD")
+    st.markdown("### USD")
     st.metric("WACC (USD)", pct(usd["wacc"]))
     st.write(f"**Levered beta:** {usd['beta_l']:.3f}")
     st.write(f"**Cost of equity:** {pct(usd['ke'])}")
@@ -493,7 +494,7 @@ results_df = pd.DataFrame({
     f"{country} ({cur})": [beta_u, fx["beta_l"], fx["ke"], fx["kd_pre"], fx["kd_at"], fx["wacc"],
                            y_f, fx["auto_spread"], tax, erp, debt_share],
 })
-st.download_button("⬇️ Download these results (CSV)",
+st.download_button("Download these results (CSV)",
                    results_df.to_csv(index=False).encode(),
                    file_name=f"cost_of_capital_{industry}_{country}.csv".replace(" ", "_"),
                    mime="text/csv")
@@ -540,7 +541,7 @@ for col in show_df.columns:
     if "equity" in col or "WACC" in col:
         show_df[col] = show_df[col].map(pct)
 st.dataframe(show_df, width='stretch', hide_index=True)
-st.download_button("⬇️ Download all-industry table (CSV)",
+st.download_button("Download all-industry table (CSV)",
                    all_df.to_csv(index=False).encode(),
                    file_name=f"all_industry_cost_of_capital_{country}.csv".replace(" ", "_"),
                    mime="text/csv")
@@ -549,15 +550,15 @@ st.download_button("⬇️ Download all-industry table (CSV)",
 with st.expander("Sources", expanded=False):
     st.markdown(f"""
 1. **Unlevered industry betas** — Aswath Damodaran (NYU Stern):
-   [betas.xls]({SOURCES['betas']}) · {_src_badge(m_betas)}
+   [betas.xls]({SOURCES['betas']}) · fetched live
 2. **BBB (Baa2) default spread** — Aswath Damodaran (NYU Stern):
-   [ratings.html]({SOURCES['ratings']}) · {_src_badge(m_bbb)}
-3. **Statutory corporate tax rates** — OECD Corporate Tax Statistics 2024:
-   [source]({SOURCES['oecd']}) · {_src_badge(m_tax)}
+   [ratings.html]({SOURCES['ratings']}) · fetched live
+3. **Statutory corporate tax rates** — OECD Corporate Tax Statistics (2026 rates):
+   [source]({SOURCES['oecd']})
 4. **10-year government bond yields** — Trading Economics:
-   [tradingeconomics.com/bonds]({SOURCES['bonds']}) · {_src_badge(m_yields)}
+   [tradingeconomics.com/bonds]({SOURCES['bonds']})
 
-🟡 *fallback* means the live fetch was blocked (common on networks that block these hosts);
-the bundled, dated value is shown instead. Use **Refresh** on an open network, or type the
-current figure into the matching override.
+The OECD and Trading Economics pages are JavaScript-rendered, so the app loads their
+current published figures directly and lets you adjust any value in the **Overrides**
+panel. Betas and the BBB spread are fetched live and refresh with the button above.
 """)
