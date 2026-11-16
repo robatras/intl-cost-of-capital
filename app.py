@@ -46,8 +46,13 @@ import streamlit as st
 
 st.set_page_config(page_title="International Cost of Capital", page_icon="🌐", layout="wide")
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+              "application/vnd.ms-excel,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 SOURCES = {
     "betas": "https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls",
@@ -134,43 +139,61 @@ CURRENCY = {
 # --------------------------------------------------------------------------------------
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def fetch_betas():
-    try:
-        r = requests.get(SOURCES["betas"], headers=UA, timeout=30)
-        r.raise_for_status()
-        raw = pd.read_excel(io.BytesIO(r.content), sheet_name=0, header=None)
-        # find the header row (the one containing "Industry Name")
-        hdr = None
-        for i in range(min(15, len(raw))):
-            row = raw.iloc[i].astype(str).str.strip().str.lower().tolist()
-            if any("industry name" in c for c in row):
-                hdr = i
-                break
-        if hdr is None:
-            raise ValueError("header row not found")
-        df = pd.read_excel(io.BytesIO(r.content), sheet_name=0, header=hdr)
-        df.columns = [str(c).strip() for c in df.columns]
-        name_col = [c for c in df.columns if "industry name" in c.lower()][0]
-        unlev_col = [c for c in df.columns if "unlever" in c.lower()][0]
-        out = {}
-        for _, row in df.iterrows():
-            name = str(row[name_col]).strip()
-            try:
-                b = float(row[unlev_col])
-            except (TypeError, ValueError):
-                continue
-            if name and name.lower() != "nan" and np.isfinite(b):
-                out[name] = round(b, 4)
-        if len(out) < 10:
-            raise ValueError("too few industries parsed")
-        return out, {"live": True, "date": dt.date.today().isoformat(), "note": "NYU Stern betas.xls"}
-    except Exception as e:  # noqa: BLE001
-        return dict(FALLBACK_BETAS), {"live": False, "date": FALLBACK_DATE, "note": f"fallback ({type(e).__name__})"}
+    # Parse positionally (by row/column index) so duplicate or merged header labels in
+    # Damodaran's workbook can't turn a cell lookup into a Series (the old TypeError).
+    last = None
+    for engine in ("xlrd", "openpyxl", None):
+        try:
+            r = requests.get(SOURCES["betas"], headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            kw = {"engine": engine} if engine else {}
+            raw = pd.read_excel(io.BytesIO(r.content), sheet_name=0, header=None, **kw)
+            hdr = None
+            for i in range(min(20, len(raw))):
+                cells = [str(x).strip().lower() for x in raw.iloc[i].tolist()]
+                if any("industry name" in c for c in cells):
+                    hdr = i
+                    break
+            if hdr is None:
+                raise ValueError("header row not found")
+            header_cells = [str(x).strip().lower() for x in raw.iloc[hdr].tolist()]
+
+            def find_col(*keys):
+                for key in keys:
+                    for j, c in enumerate(header_cells):
+                        if key in c:
+                            return j
+                return None
+
+            name_j = find_col("industry name")
+            unlev_j = find_col("unlevered beta", "unlever")
+            if name_j is None or unlev_j is None:
+                raise ValueError("name/unlevered column not found")
+
+            out = {}
+            for i in range(hdr + 1, len(raw)):
+                name = str(raw.iat[i, name_j]).strip()
+                try:
+                    b = float(raw.iat[i, unlev_j])
+                except (TypeError, ValueError):
+                    continue
+                if name and name.lower() != "nan" and np.isfinite(b):
+                    out[name] = round(b, 4)
+            if len(out) < 10:
+                raise ValueError("too few industries parsed")
+            return out, {"live": True, "date": dt.date.today().isoformat(),
+                         "note": "NYU Stern betas.xls"}
+        except Exception as e:  # noqa: BLE001
+            last = e
+            continue
+    return dict(FALLBACK_BETAS), {"live": False, "date": FALLBACK_DATE,
+                                  "note": f"fallback ({type(last).__name__ if last else 'error'})"}
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def fetch_bbb():
     try:
-        r = requests.get(SOURCES["ratings"], headers=UA, timeout=30)
+        r = requests.get(SOURCES["ratings"], headers=HEADERS, timeout=30)
         r.raise_for_status()
         tables = pd.read_html(io.StringIO(r.text))
         for t in tables:
@@ -196,29 +219,35 @@ def fetch_bbb():
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def fetch_yields():
+    # Trading Economics is JS-rendered and bot-screened, so a plain request often returns
+    # no usable table. We scan every table for rows whose first cell names a country we
+    # track and whose row has a plausible yield number. Falls back otherwise; the override
+    # fields let you enter current yields by hand.
+    known = {k.lower(): k for k in FALLBACK_YIELD}
     try:
-        r = requests.get(SOURCES["bonds"], headers=UA, timeout=30)
+        r = requests.get(SOURCES["bonds"], headers=HEADERS, timeout=30)
         r.raise_for_status()
         tables = pd.read_html(io.StringIO(r.text))
         out = {}
         for t in tables:
-            cols = [str(c).lower() for c in t.columns]
-            # Trading Economics bond tables have a country/name col and a Yield col
-            name_idx = next((i for i, c in enumerate(cols) if c in ("major10y", "country", "bond", "")), 0)
-            yld_idx = next((i for i, c in enumerate(cols) if "yield" in c or c == "last"), None)
-            if yld_idx is None:
-                continue
             for _, row in t.iterrows():
-                name = str(row.iloc[name_idx]).strip()
-                try:
-                    y = float(str(row.iloc[yld_idx]).replace("%", "").strip())
-                except ValueError:
+                vals = [str(v).strip() for v in row.tolist()]
+                name = known.get(vals[0].lower()) if vals else None
+                if not name:
                     continue
-                if name and -5 < y < 100:
-                    out[name] = round(y, 4)
+                for v in vals[1:]:
+                    try:
+                        y = float(v.replace("%", "").strip())
+                    except ValueError:
+                        continue
+                    if -5 < y < 100:
+                        out[name] = round(y, 4)
+                        break
         if len(out) < 5:
             raise ValueError("too few yields parsed")
-        return out, {"live": True, "date": dt.date.today().isoformat(), "note": "Trading Economics /bonds"}
+        merged = dict(FALLBACK_YIELD)
+        merged.update(out)
+        return merged, {"live": True, "date": dt.date.today().isoformat(), "note": "Trading Economics /bonds"}
     except Exception as e:  # noqa: BLE001
         return dict(FALLBACK_YIELD), {"live": False, "date": FALLBACK_DATE, "note": f"fallback ({type(e).__name__})"}
 
@@ -229,7 +258,7 @@ def fetch_tax():
     # table, so the bundled OECD 2024 figures are the practical default. A manual override
     # lets you enter the exact current rate.
     try:
-        r = requests.get(SOURCES["oecd"], headers=UA, timeout=30)
+        r = requests.get(SOURCES["oecd"], headers=HEADERS, timeout=30)
         r.raise_for_status()
         tables = pd.read_html(io.StringIO(r.text))
         out = {}
