@@ -137,55 +137,77 @@ CURRENCY = {
 # Live fetchers. Each returns (data, meta) where meta = {"live": bool, "date": str,
 # "note": str}. Any failure falls back silently to the bundled values.
 # --------------------------------------------------------------------------------------
+def _parse_beta_matrix(raw):
+    """Pull {industry: unlevered beta} from a header-less matrix (Excel or HTML table).
+    Positional lookups avoid duplicate-label Series issues."""
+    hdr = None
+    for i in range(min(25, len(raw))):
+        cells = [str(x).strip().lower() for x in raw.iloc[i].tolist()]
+        if any("industry name" in c for c in cells):
+            hdr = i
+            break
+    if hdr is None:
+        raise ValueError("header row not found")
+    header_cells = [str(x).strip().lower() for x in raw.iloc[hdr].tolist()]
+
+    def find_col(*keys):
+        for key in keys:
+            for j, c in enumerate(header_cells):
+                if key in c:
+                    return j
+        return None
+
+    name_j = find_col("industry name")
+    unlev_j = find_col("unlevered beta", "unlever")
+    if name_j is None or unlev_j is None:
+        raise ValueError("name/unlevered column not found")
+
+    out = {}
+    for i in range(hdr + 1, len(raw)):
+        name = str(raw.iat[i, name_j]).strip()
+        try:
+            b = float(raw.iat[i, unlev_j])
+        except (TypeError, ValueError):
+            continue
+        if name and name.lower() != "nan" and np.isfinite(b):
+            out[name] = round(b, 4)
+    if len(out) < 10:
+        raise ValueError("too few industries parsed")
+    return out
+
+
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def fetch_betas():
-    # Parse positionally (by row/column index) so duplicate or merged header labels in
-    # Damodaran's workbook can't turn a cell lookup into a Series (the old TypeError).
     last = None
-    for engine in ("xlrd", "openpyxl", None):
+    try:
+        r = requests.get(SOURCES["betas"], headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        return dict(FALLBACK_BETAS), {"live": False, "date": FALLBACK_DATE,
+                                      "note": f"fallback ({type(e).__name__})"}
+
+    # 1) try real Excel (binary .xls or .xlsx)
+    for engine in ("xlrd", "openpyxl"):
         try:
-            r = requests.get(SOURCES["betas"], headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            kw = {"engine": engine} if engine else {}
-            raw = pd.read_excel(io.BytesIO(r.content), sheet_name=0, header=None, **kw)
-            hdr = None
-            for i in range(min(20, len(raw))):
-                cells = [str(x).strip().lower() for x in raw.iloc[i].tolist()]
-                if any("industry name" in c for c in cells):
-                    hdr = i
-                    break
-            if hdr is None:
-                raise ValueError("header row not found")
-            header_cells = [str(x).strip().lower() for x in raw.iloc[hdr].tolist()]
-
-            def find_col(*keys):
-                for key in keys:
-                    for j, c in enumerate(header_cells):
-                        if key in c:
-                            return j
-                return None
-
-            name_j = find_col("industry name")
-            unlev_j = find_col("unlevered beta", "unlever")
-            if name_j is None or unlev_j is None:
-                raise ValueError("name/unlevered column not found")
-
-            out = {}
-            for i in range(hdr + 1, len(raw)):
-                name = str(raw.iat[i, name_j]).strip()
-                try:
-                    b = float(raw.iat[i, unlev_j])
-                except (TypeError, ValueError):
-                    continue
-                if name and name.lower() != "nan" and np.isfinite(b):
-                    out[name] = round(b, 4)
-            if len(out) < 10:
-                raise ValueError("too few industries parsed")
-            return out, {"live": True, "date": dt.date.today().isoformat(),
-                         "note": "NYU Stern betas.xls"}
+            raw = pd.read_excel(io.BytesIO(r.content), sheet_name=0, header=None, engine=engine)
+            return _parse_beta_matrix(raw), {"live": True, "date": dt.date.today().isoformat(),
+                                             "note": "NYU Stern betas.xls (Excel)"}
         except Exception as e:  # noqa: BLE001
             last = e
-            continue
+
+    # 2) some Damodaran ".xls" files are actually HTML tables -> read as HTML
+    try:
+        tables = pd.read_html(io.StringIO(r.content.decode("latin-1", errors="ignore")))
+        for t in tables:
+            raw = pd.DataFrame([list(t.columns)] + t.values.tolist())
+            try:
+                return _parse_beta_matrix(raw), {"live": True, "date": dt.date.today().isoformat(),
+                                                 "note": "NYU Stern betas.xls (HTML)"}
+            except Exception as e:  # noqa: BLE001
+                last = e
+    except Exception as e:  # noqa: BLE001
+        last = e
+
     return dict(FALLBACK_BETAS), {"live": False, "date": FALLBACK_DATE,
                                   "note": f"fallback ({type(last).__name__ if last else 'error'})"}
 
